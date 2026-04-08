@@ -1,0 +1,20 @@
+# Environnements virtuels
+venv/
+env/
+.env
+
+# Fichiers de cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Données (On ignore tout le contenu sauf les .gitkeep éventuels)
+data/*
+!data/.gitkeep
+
+# Modèles sauvegardés
+models/*.pkl
+
+# Configuration Streamlit et Jupyter
+.streamlit/
+.ipynb_checkpoints/
