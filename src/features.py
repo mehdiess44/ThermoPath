@@ -7,30 +7,7 @@ def inject_synthetic_faults(
     num_shocks: int = 3,
     seed: int | None = 42,
 ) -> pd.DataFrame:
-    """Injecte des anomalies synthétiques (chocs mécaniques + dérive thermique)
-    dans un DataFrame temporel resamplé à la minute.
-
-    Trois étapes successives :
-        A. Création d'une baseline de vibrations mécaniques (bruit gaussien).
-        B. Injection de *num_shocks* pics G-Force extrêmes (nids-de-poule).
-        C. Ajout d'une dérive thermique cumulative (+0.05 °C/min) sur les
-           60 minutes suivant chaque choc, simulant un pont thermique.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame indexé par un DatetimeIndex à fréquence 1 min.
-        Doit contenir la colonne ``thermal_shipper_temp_reading``.
-    num_shocks : int, optional
-        Nombre de chocs à injecter (par défaut 3).
-    seed : int | None, optional
-        Graine pour la reproductibilité (par défaut 42).
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame enrichi des colonnes ``g_force`` et ``is_shock``.
-    """
+    """Injecte des chocs mécaniques et leur conséquence thermique dans un DataFrame."""
     rng = np.random.default_rng(seed)
     df = df.copy()
     n = len(df)
@@ -73,6 +50,28 @@ def inject_synthetic_faults(
     return df
 
 
+def create_rolling_features(
+    df: pd.DataFrame,
+    window_size: int = 5,
+) -> pd.DataFrame:
+    """Génère les features glissantes et la vélocité thermique."""
+    df = df.copy()
+
+    # ── Étape A : Statistiques glissantes (Rolling Windows) ─────────────
+    df["temp_mean"] = df["thermal_shipper_temp_reading"].rolling(window=window_size).mean()
+    df["temp_std"] = df["thermal_shipper_temp_reading"].rolling(window=window_size).std()
+    df["g_force_mean"] = df["g_force"].rolling(window=window_size).mean()
+    df["g_force_std"] = df["g_force"].rolling(window=window_size).std()
+
+    # ── Étape B : Vélocité (taux de changement) ────────────────────────
+    df["temp_velocity"] = df["thermal_shipper_temp_reading"].diff()
+
+    # ── Étape C : Nettoyage des NaN générés ────────────────────────────
+    df = df.dropna()
+
+    return df
+
+
 # ── Point d'entrée pour test ───────────────────────────────────────────
 if __name__ == "__main__":
     try:
@@ -87,9 +86,10 @@ if __name__ == "__main__":
     print("⚡ Injection des failles synthétiques…")
     df = inject_synthetic_faults(df, num_shocks=3)
 
-    total_shocks = df["is_shock"].sum()
-    print(f"\n✅ Nombre total de chocs injectés : {total_shocks}")
+    print("📊 Création des rolling features…")
+    df = create_rolling_features(df, window_size=5)
 
-    shocks = df[df["is_shock"] == 1]
-    print("\n── Lignes de chocs ──")
-    print(shocks[["g_force", "is_shock", "thermal_shipper_temp_reading"]])
+    print(f"\n✅ Colonnes finales : {list(df.columns)}")
+    print("\n── 5 premières lignes (features sélectionnées) ──")
+    print(df[["thermal_shipper_temp_reading", "temp_mean", "temp_std", "temp_velocity", "g_force_std"]].head())
+    print(f"\n📐 Dimension finale (après dropna) : {df.shape}")
