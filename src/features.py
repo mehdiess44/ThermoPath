@@ -17,8 +17,7 @@ def inject_synthetic_faults(
     df["is_shock"] = 0
 
     # ── Étape B : Injection des chocs (nids-de-poule) ──────────────────
-    # On évite les 60 dernières minutes pour laisser de la place à la
-    # dérive thermique de l'étape C.
+    # On évite les 60 dernières minutes pour laisser de la place à la dérive thermique de l'étape C.
     safe_zone = max(0, n - 60)
     if safe_zone < num_shocks:
         raise ValueError(
