@@ -14,6 +14,18 @@ import pandas as pd
 import numpy as np
 import joblib
 import paho.mqtt.client as mqtt
+import base64
+
+def play_alert_sound(file_path):
+    with open(file_path, "rb") as f:
+        data = f.read()
+        b64 = base64.b64encode(data).decode()
+        md = f"""
+            <audio autoplay="true">
+            <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+            </audio>
+            """
+        st.markdown(md, unsafe_allow_html=True)
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -131,8 +143,22 @@ if status is None:
 elif status == 0:
     st.success("🟢 STATUT NORMAL — Système stable.")
 elif status == 1:
-    st.error("🔴 ALERTE — ANOMALIE THERMIQUE OU CHOC DÉTECTÉ !")
-
+    st.error("🔴 ALERTE — ANOMALIE DÉTECTÉE !")
+    play_alert_sound(r"C:\Users\mehdi\ThermoPath\assets\alert.mp3")
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background-color: #4b0000;
+            animation: blinker 1s linear infinite;
+        }
+        @keyframes blinker {
+            50% { opacity: 0.7; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
 st.markdown("")
 
 col1, col2, col3 = st.columns(3)
