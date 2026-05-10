@@ -1,85 +1,158 @@
-﻿"""
-ThermoPath - Dashboard de Surveillance Temps Réel (Version UI/UX Driver)
+"""
+ThermoPath - Dashboard de Surveillance Temps Réel (Version Industrialisée)
 ========================================================================
-Interface Streamlit optimisée pour la cabine d'un chauffeur.
+Application Streamlit de jumeau numérique IoT pour la chaîne du froid.
+- Wildcard 1 : Résilience Réseau Absolue (Auto-reconnect & Health Check)
+- Wildcard 2 : Explicabilité IA (Score de Risque Thermique via decision_function)
+- UX Chauffeur : Cartes géantes, jauge de risque, flash d'alerte, son
 """
 
 import streamlit as st
 import threading
 import time
 import json
+import base64
 from collections import deque
 from datetime import datetime
-
 import pandas as pd
 import numpy as np
 import joblib
 import paho.mqtt.client as mqtt
-import base64
 import warnings
+import os
 
-warnings.filterwarnings("ignore", category=UserWarning)
+# ── Suppression des avertissements Scikit-Learn ──────────────────────────────
+warnings.filterwarnings("ignore")
 
 # ── Configuration Streamlit ──────────────────────────────────────────────────
-st.set_page_config(page_title="ThermoPath Live", page_icon="🚛", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="ThermoPath Live",
+    page_icon="🚛",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-# ── Fonction Audio ───────────────────────────────────────────────────────────
-def play_alert_sound(file_path):
-    try:
-        with open(file_path, "rb") as f:
-            data = f.read()
-            b64 = base64.b64encode(data).decode()
-            md = f"""
-                <audio autoplay="true">
-                <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-                </audio>
-                """
-            st.markdown(md, unsafe_allow_html=True)
-    except FileNotFoundError:
-        pass # Ignore silencieusement si le fichier son n'est pas trouvé
-
-# ── Configuration MQTT & Modèle ──────────────────────────────────────────────
-BROKER_HOST = "localhost"
-BROKER_PORT = 1883
+# ── Configuration MQTT & Modèle ─────────────────────────────────────────────
+# Variables d'environnement pour Docker, localhost par défaut pour les tests
+BROKER_HOST = os.getenv("BROKER_HOST", "localhost")
+BROKER_PORT = int(os.getenv("BROKER_PORT", "1883"))
 TOPIC = "thermopath/sensor"
-BUFFER_SIZE = 5
+BUFFER_SIZE = 5  # Taille du tampon glissant pour le calcul des features IA
 
 MODEL_PATH = "models/model.pkl"
 SCALER_PATH = "models/scaler.pkl"
+ALERT_SOUND_PATH = "assets/alert.mp3"
 
-# ── LA BOÎTE AUX LETTRES (Shared State) ──────────────────────────────────────
+
+# ── Fonction utilitaire : Alerte sonore ──────────────────────────────────────
+def play_alert_sound(file_path: str):
+    """
+    Joue un fichier audio via un composant HTML <audio autoplay> encodé en base64.
+    Si le fichier n'existe pas, la fonction ne fait rien (dégradation gracieuse).
+    """
+    if not os.path.isfile(file_path):
+        return
+    try:
+        with open(file_path, "rb") as f:
+            audio_bytes = f.read()
+            b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
+            audio_html = (
+                f'<audio autoplay="true" style="display:none;">'
+                f'<source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">'
+                f"</audio>"
+            )
+            st.markdown(audio_html, unsafe_allow_html=True)
+    except Exception:
+        # Dégradation gracieuse : si le son ne peut pas être joué, on continue
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. ÉTAT PARTAGÉ (Boîte aux lettres inter-threads)
+# ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource
-def get_shared_state():
+def get_shared_state() -> dict:
+    """
+    Initialise le dictionnaire global partagé entre le thread MQTT et Streamlit.
+    - deque(maxlen=5) : tampon glissant pour le calcul des 7 features IA.
+    - deque(maxlen=100) : historique pour les graphiques temps réel.
+    """
     return {
+        # Tampons glissants pour le calcul IA (fenêtre de 5 points)
         "temp_buffer": deque(maxlen=BUFFER_SIZE),
         "gforce_buffer": deque(maxlen=BUFFER_SIZE),
+        # Historiques pour les graphiques (100 derniers points)
         "temp_history": deque(maxlen=100),
         "gforce_history": deque(maxlen=100),
+        # Dernières valeurs instantanées
         "last_temp": None,
         "last_gforce": None,
-        "last_status": None, 
+        # Résultat de l'IA : 0 = normal, 1 = anomalie, None = pas encore assez de données
+        "last_status": None,
+        # Wildcard 2 : Indice de Risque Thermique (0 à 100)
+        "risk_score": 0,
+        # Compteur de messages reçus
         "message_count": 0,
-        "last_update": "En attente..."
+        # Horodatage de la dernière mise à jour
+        "last_update": "En attente...",
+        # Wildcard 1 : État de connexion MQTT
+        "mqtt_connected": False,
     }
+
 
 shared_state = get_shared_state()
 
-# ── Thread MQTT en arrière-plan ──────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. THREAD MQTT (Résilience Réseau + IA en temps réel)
+# ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource
 def start_mqtt_listener():
+    """
+    Démarre le client MQTT dans un thread daemon séparé.
+    - Charge le modèle Isolation Forest et le scaler.
+    - Implémente on_connect / on_disconnect pour la résilience réseau.
+    - Implémente on_message pour le calcul IA en temps réel.
+    - Gère l'échec de connexion initiale avec un thread de reconnexion.
+    """
+    # Chargement du modèle et du scaler
     model = joblib.load(MODEL_PATH)
     scaler = joblib.load(SCALER_PATH)
 
+    # ── Callback : Connexion établie ─────────────────────────────────────
     def on_connect(client, userdata, flags, reason_code, properties):
+        """Appelé quand la connexion MQTT est établie."""
         if reason_code == 0:
+            shared_state["mqtt_connected"] = True
             client.subscribe(TOPIC)
+            print(f"[OK] Connecte au broker MQTT ({BROKER_HOST}:{BROKER_PORT})")
+        else:
+            shared_state["mqtt_connected"] = False
+            print(f"[ERREUR] Echec de connexion MQTT, code : {reason_code}")
 
+    # ── Callback : Connexion perdue ──────────────────────────────────────
+    def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+        """Appelé quand la connexion MQTT est perdue."""
+        shared_state["mqtt_connected"] = False
+        print("[WARN] Perte de connexion MQTT. Tentative de reconnexion en cours...")
+
+    # ── Callback : Message reçu ──────────────────────────────────────────
     def on_message(client, userdata, msg):
+        """
+        Traite chaque message MQTT reçu :
+        1. Décode le payload JSON (temp, g_force).
+        2. Alimente les tampons et historiques.
+        3. Calcule les 7 features de l'IA.
+        4. Applique le scaler puis le modèle Isolation Forest.
+        5. Utilise decision_function() pour obtenir le score brut.
+        6. Transforme le score en Indice de Risque Thermique (0-100%).
+        """
         try:
             payload = json.loads(msg.payload.decode())
-            temp = payload["temp"]
-            g_force = payload["g_force"]
+            temp = float(payload["temp"])
+            g_force = float(payload["g_force"])
 
+            # Mise à jour des tampons glissants et historiques
             shared_state["temp_buffer"].append(temp)
             shared_state["gforce_buffer"].append(g_force)
             shared_state["temp_history"].append(temp)
@@ -89,180 +162,437 @@ def start_mqtt_listener():
             shared_state["message_count"] += 1
             shared_state["last_update"] = datetime.now().strftime("%H:%M:%S")
 
-            current_len = len(shared_state["temp_buffer"])
-
-            if current_len < BUFFER_SIZE:
+            # On attend d'avoir assez de données pour le calcul IA
+            if len(shared_state["temp_buffer"]) < BUFFER_SIZE:
                 shared_state["last_status"] = None
                 return
 
+            # Calcul des 7 features
             temp_array = np.array(shared_state["temp_buffer"])
             gforce_array = np.array(shared_state["gforce_buffer"])
 
-            features = pd.DataFrame([{
-                "thermal_shipper_temp_reading": temp,
-                "g_force": g_force,
-                "temp_mean": np.mean(temp_array),
-                "temp_std": np.std(temp_array),
-                "g_force_mean": np.mean(gforce_array),
-                "g_force_std": np.std(gforce_array),
-                "temp_velocity": temp_array[-1] - temp_array[0],
-            }])
+            features = pd.DataFrame(
+                [
+                    {
+                        "thermal_shipper_temp_reading": temp,
+                        "g_force": g_force,
+                        "temp_mean": np.mean(temp_array),
+                        "temp_std": np.std(temp_array),
+                        "g_force_mean": np.mean(gforce_array),
+                        "g_force_std": np.std(gforce_array),
+                        "temp_velocity": temp_array[-1] - temp_array[0],
+                    }
+                ]
+            )
 
+            # Normalisation avec le scaler entraîné
             features_scaled = scaler.transform(features)
+
+            # ── WILDCARD 2 : Explicabilité Mathématique ──────────────────
+            # predict() → -1 (anomalie) ou 1 (normal)
+            # decision_function() → score brut (distance à la frontière)
+            #   Plus le score est négatif, plus l'observation est anormale.
+            raw_score = model.decision_function(features_scaled)[0]
             prediction = model.predict(features_scaled)[0]
 
+            # Transformation du score brut en Indice de Risque (0% à 100%)
+            # Formule : on centre la frontière (score=0) autour de 50%.
+            # Score très négatif → Risque élevé (vers 100%)
+            # Score très positif → Risque faible (vers 0%)
+            risk_index = 50 - (raw_score * 200)
+            shared_state["risk_score"] = int(np.clip(risk_index, 0, 100))
+
+            # Statut binaire pour l'UI : 1 = anomalie, 0 = normal
             shared_state["last_status"] = 1 if prediction == -1 else 0
 
+        except json.JSONDecodeError as e:
+            print(f"[ERREUR] Erreur de decodage JSON : {e}")
+        except KeyError as e:
+            print(f"[ERREUR] Cle manquante dans le payload : {e}")
         except Exception as e:
-            print(f"Erreur ML : {e}")
+            print(f"[ERREUR] Erreur dans le traitement ML : {e}")
 
-    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+    # ── Création et configuration du client MQTT ─────────────────────────
+    client = mqtt.Client(
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        client_id="thermopath-dashboard",
+    )
     client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
     client.on_message = on_message
-    client.connect(BROKER_HOST, BROKER_PORT)
 
-    thread = threading.Thread(target=client.loop_forever, daemon=True)
+    # ── WILDCARD 1 : Résilience Réseau Absolue ───────────────────────────
+    # Paramétrage de la reconnexion automatique de Paho-MQTT
+    # En cas de perte de connexion, Paho retente de 1s à 120s (backoff exponentiel)
+    client.reconnect_delay_set(min_delay=1, max_delay=120)
+
+    # Tentative de connexion initiale dans un thread séparé.
+    # Si le broker n'est pas joignable au démarrage, on retente indéfiniment
+    # au lieu de crasher l'application.
+    def connect_with_retry():
+        """Boucle de connexion initiale avec backoff exponentiel."""
+        retry_delay = 1  # Délai initial en secondes
+        max_delay = 30  # Délai maximum entre les tentatives
+        while True:
+            try:
+                client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
+                # loop_forever gere automatiquement la reconnexion apres
+                # une connexion initiale reussie.
+                client.loop_forever()
+                break  # Si loop_forever retourne proprement
+            except OSError as e:
+                shared_state["mqtt_connected"] = False
+                print(
+                    f"[WARN] Broker MQTT injoignable ({BROKER_HOST}:{BROKER_PORT}). "
+                    f"Nouvelle tentative dans {retry_delay}s... ({e})"
+                )
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_delay)
+            except Exception as e:
+                shared_state["mqtt_connected"] = False
+                print(f"[ERREUR] Erreur inattendue MQTT : {e}. Nouvelle tentative dans {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_delay)
+
+    thread = threading.Thread(target=connect_with_retry, daemon=True)
     thread.start()
     return thread
 
+
+# Démarrage du thread MQTT (une seule fois grâce à cache_resource)
 start_mqtt_listener()
 
-# ── INTERFACE UTILISATEUR (Streamlit UI/UX) ──────────────────────────────────
 
-# CSS Global pour le style industriel
-st.markdown("""
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. INTERFACE UTILISATEUR (Streamlit UI/UX "Chauffeur")
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Lecture des valeurs actuelles depuis l'état partagé ───────────────────────
+status = shared_state["last_status"]
+temp_val = shared_state["last_temp"]
+gforce_val = shared_state["last_gforce"]
+risk_val = shared_state["risk_score"]
+is_connected = shared_state["mqtt_connected"]
+msg_count = shared_state["message_count"]
+last_update = shared_state["last_update"]
+
+# ── CSS Personnalisé : Design "Terminal Cabine" ──────────────────────────────
+# CSS de base pour les cartes de métriques, la jauge de risque, et le flash d'alerte
+alert_css = ""
+if status == 1:
+    # FLASH D'ALERTE : fond de l'application clignote en rouge
+    alert_css = """
+    .stApp {
+        background-color: #3b0000 !important;
+        animation: blinker 1s linear infinite !important;
+    }
+    """
+
+st.markdown(
+    f"""
     <style>
-    /* Style des grandes cartes de métriques */
-    .metric-card {
-        background-color: #1E1E1E;
-        border-radius: 15px;
-        padding: 20px;
+    /* ── Import Google Fonts ─────────────────────────────────────────── */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+
+    /* ── Variables globales ──────────────────────────────────────────── */
+    .stApp {{
+        font-family: 'Inter', sans-serif;
+    }}
+
+    /* ── Animation de clignotement pour les alertes ──────────────────── */
+    @keyframes blinker {{
+        0%   {{ background-color: #1a0000; }}
+        50%  {{ background-color: #660000; }}
+        100% {{ background-color: #1a0000; }}
+    }}
+
+    @keyframes pulse {{
+        0%   {{ transform: scale(1); }}
+        50%  {{ transform: scale(1.03); }}
+        100% {{ transform: scale(1); }}
+    }}
+
+    @keyframes glow {{
+        0%   {{ box-shadow: 0 0 5px rgba(0, 191, 255, 0.3); }}
+        50%  {{ box-shadow: 0 0 20px rgba(0, 191, 255, 0.6); }}
+        100% {{ box-shadow: 0 0 5px rgba(0, 191, 255, 0.3); }}
+    }}
+
+    /* ── Cartes de métriques géantes ─────────────────────────────────── */
+    .metric-card {{
+        background: linear-gradient(145deg, #1a1a2e 0%, #16213e 100%);
+        border-radius: 20px;
+        padding: 30px 20px;
         text-align: center;
-        border: 2px solid #333;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-    }
-    .metric-title {
-        color: #888;
-        font-size: 1.5rem;
-        margin-bottom: 10px;
-        font-weight: bold;
-    }
-    .metric-value {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        transition: all 0.3s ease;
+        animation: glow 3s ease-in-out infinite;
+    }}
+    .metric-card:hover {{
+        transform: translateY(-4px);
+        box-shadow: 0 12px 40px rgba(0, 191, 255, 0.2);
+    }}
+    .metric-title {{
+        color: #8899AA;
+        font-size: 1.1rem;
+        margin-bottom: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+    }}
+    .metric-value {{
         color: #FFFFFF;
-        font-size: 4.5rem;
+        font-size: 4rem;
         font-weight: 900;
         margin: 0;
         line-height: 1;
-    }
-    .metric-unit {
-        font-size: 2rem;
-        color: #AAA;
-    }
-    /* Mode Alerte (Clignotement Rouge) */
-    .alert-mode {
-        background-color: #3b0000 !important;
-        animation: blinker 1.5s linear infinite;
-    }
-    @keyframes blinker {
-        50% { opacity: 0.8; background-color: #660000 !important; }
-    }
-    /* Instructions en cas d'alerte */
-    .alert-instruction {
-        background-color: #FFDDDD;
-        color: #900;
-        padding: 20px;
-        border-radius: 10px;
+        text-shadow: 0 0 20px rgba(0, 191, 255, 0.3);
+    }}
+    .metric-unit {{
         font-size: 1.8rem;
-        font-weight: bold;
+        color: #6699BB;
+        font-weight: 400;
+    }}
+
+    /* ── Carte en alerte ─────────────────────────────────────────────── */
+    .metric-card-alert {{
+        background: linear-gradient(145deg, #2d0a0a 0%, #3b0000 100%);
+        border-radius: 20px;
+        padding: 30px 20px;
         text-align: center;
-        border-left: 10px solid #D00;
-        margin-top: 20px;
-    }
+        border: 2px solid #ff4444;
+        box-shadow: 0 0 30px rgba(255, 0, 0, 0.3);
+        animation: pulse 1s ease-in-out infinite;
+    }}
+    .metric-card-alert .metric-value {{
+        color: #FF4444;
+        text-shadow: 0 0 20px rgba(255, 0, 0, 0.5);
+    }}
+
+    /* ── Badge de connexion ──────────────────────────────────────────── */
+    .badge-connected {{
+        background: linear-gradient(135deg, #0a3d0a 0%, #1a5c1a 100%);
+        color: #00FF88;
+        padding: 8px 18px;
+        border-radius: 50px;
+        font-weight: 700;
+        font-size: 0.95rem;
+        display: inline-block;
+        border: 1px solid #00FF88;
+        box-shadow: 0 0 12px rgba(0, 255, 136, 0.3);
+    }}
+    .badge-disconnected {{
+        background: linear-gradient(135deg, #3d0a0a 0%, #5c1a1a 100%);
+        color: #FF4444;
+        padding: 8px 18px;
+        border-radius: 50px;
+        font-weight: 700;
+        font-size: 0.95rem;
+        display: inline-block;
+        border: 1px solid #FF4444;
+        box-shadow: 0 0 12px rgba(255, 68, 68, 0.3);
+        animation: blinker 1.5s linear infinite;
+    }}
+
+    /* ── Jauge de risque ─────────────────────────────────────────────── */
+    .risk-label {{
+        text-align: center;
+        font-size: 1.6rem;
+        font-weight: 900;
+        margin-top: 8px;
+    }}
+    .risk-low {{ color: #00FF88; }}
+    .risk-medium {{ color: #FFA500; }}
+    .risk-high {{ color: #FF4444; text-shadow: 0 0 10px rgba(255,0,0,0.5); }}
+
+    /* ── En-tête ─────────────────────────────────────────────────────── */
+    .header-title {{
+        margin: 0;
+        color: #00BFFF;
+        font-size: 1.8rem;
+        font-weight: 900;
+        letter-spacing: 1px;
+    }}
+    .header-subtitle {{
+        margin: 0;
+        color: #556677;
+        font-size: 0.9rem;
+    }}
+
+    /* ── Séparateur ──────────────────────────────────────────────────── */
+    .custom-hr {{
+        border: none;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #334455, transparent);
+        margin: 15px 0 25px 0;
+    }}
+
+    /* ── Stats footer ────────────────────────────────────────────────── */
+    .stats-bar {{
+        color: #556677;
+        font-size: 0.85rem;
+        text-align: center;
+        padding: 10px;
+    }}
+    .stats-bar span {{
+        margin: 0 15px;
+    }}
+
+    {alert_css}
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-status = shared_state["last_status"]
-buffer_len = len(shared_state["temp_buffer"])
-temp_val = shared_state["last_temp"]
-gforce_val = shared_state["last_gforce"]
-
-# Déclenchement de l'alerte sonore et visuelle
+# ── Alerte sonore si anomalie détectée ───────────────────────────────────────
 if status == 1:
-    play_alert_sound(r"C:\Users\mehdi\ThermoPath\assets\alert.mp3")
-    st.markdown('<script>parent.document.body.classList.add("alert-mode");</script>', unsafe_allow_html=True)
-    st.markdown('<style>.stApp { background-color: #3b0000; animation: blinker 1s linear infinite; }</style>', unsafe_allow_html=True)
-else:
-    st.markdown('<script>parent.document.body.classList.remove("alert-mode");</script>', unsafe_allow_html=True)
+    play_alert_sound(ALERT_SOUND_PATH)
 
+# ══════════════════════════════════════════════════════════════════════════════
+# EN-TÊTE & INDICATEUR RÉSEAU
+# ══════════════════════════════════════════════════════════════════════════════
+col_logo, col_net = st.columns([3, 1])
 
-# ── HEADER ───────────────────────────────────────────────────────────────────
-col_logo, col_time = st.columns([3, 1])
 with col_logo:
-    st.markdown("<h2 style='margin:0; color:#00BFFF;'>🚛 ThermoPath - Terminal Cabine</h2>", unsafe_allow_html=True)
-with col_time:
-    st.markdown(f"<h4 style='text-align:right; color:#888; margin:0;'>Dernière synchro: {shared_state['last_update']}</h4>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <p class="header-title">🚛 ThermoPath — Terminal Cabine</p>
+        <p class="header-subtitle">Surveillance temps réel de la chaîne du froid</p>
+        """,
+        unsafe_allow_html=True,
+    )
 
-st.markdown("<hr style='margin-top:5px; margin-bottom:20px;'>", unsafe_allow_html=True)
+with col_net:
+    # Wildcard 1 : Badge de connexion dynamique
+    if is_connected:
+        st.markdown(
+            '<div style="text-align:right; margin-top:5px;">'
+            '<span class="badge-connected">🟢 MQTT : Connecté</span>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="text-align:right; margin-top:5px;">'
+            '<span class="badge-disconnected">🔴 MQTT : Déconnecté (Reconnexion...)</span>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        f'<p style="text-align:right; color:#556677; margin:4px 0 0 0; font-size:0.85rem;">'
+        f"Dernière activité : {last_update}</p>",
+        unsafe_allow_html=True,
+    )
 
-# ── BANDEAU STATUT ───────────────────────────────────────────────────────────
-if status is None:
-    st.info(f"🔄 Initialisation des capteurs... ({buffer_len}/{BUFFER_SIZE} s)")
-elif status == 0:
-    st.success("✅ SYSTÈME OPÉRATIONNEL - CARGAISON SÉCURISÉE")
-elif status == 1:
-    st.error("⚠️ ALERTE RUPTURE CHAÎNE DU FROID OU CHOC ⚠️")
+st.markdown('<div class="custom-hr"></div>', unsafe_allow_html=True)
 
-# ── CARTES DE MÉTRIQUES GÉANTES ──────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# JAUGE DE RISQUE PRÉDICTIF (WILDCARD 2 : Explicabilité IA)
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    "<h3 style='text-align:center; color:#8899AA; font-weight:700; "
+    "letter-spacing:2px; text-transform:uppercase; margin-bottom:5px;'>"
+    "🧠 Indice de Risque Prédictif (IA)</h3>",
+    unsafe_allow_html=True,
+)
+
+# Barre de progression avec couleur conditionnelle
+# Streamlit ne supporte pas les couleurs custom sur st.progress, mais on affiche
+# le label avec la bonne couleur en dessous.
+st.progress(risk_val / 100.0)
+
+# Label de risque coloré
+if risk_val < 50:
+    risk_class = "risk-low"
+    risk_text = f"✅ Risque à {risk_val}% — Chaîne du froid sécurisée"
+elif risk_val < 80:
+    risk_class = "risk-medium"
+    risk_text = f"⚠️ Risque à {risk_val}% — Surveillance renforcée"
+else:
+    risk_class = "risk-high"
+    risk_text = f"🚨 Risque à {risk_val}% — RUPTURE IMMINENTE !"
+
+st.markdown(
+    f'<p class="risk-label {risk_class}">{risk_text}</p>',
+    unsafe_allow_html=True,
+)
+
+st.markdown("", unsafe_allow_html=True)  # Espacement
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CARTES DE MÉTRIQUES GÉANTES
+# ══════════════════════════════════════════════════════════════════════════════
 col1, col2 = st.columns(2)
 
-# Formatage des valeurs
-temp_display = f"{temp_val:.1f}" if temp_val is not None else "--"
-gforce_display = f"{gforce_val:.2f}" if gforce_val is not None else "--"
+temp_display = f"{temp_val:.1f}" if temp_val is not None else "—"
+gforce_display = f"{gforce_val:.2f}" if gforce_val is not None else "—"
 
-# Couleur dynamique pour la température (Rouge si chaud, Bleu si froid)
-temp_color = "#FF4444" if (temp_val is not None and temp_val > -60) else "#00BFFF"
-# Couleur dynamique pour la force G (Rouge si gros choc)
-gforce_color = "#FF4444" if (gforce_val is not None and gforce_val > 2.0) else "#00FF00"
+# Choix de la classe CSS selon le statut d'alerte
+card_class = "metric-card-alert" if status == 1 else "metric-card"
 
 with col1:
-    st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">🌡️ TEMPÉRATURE INTERNE</div>
-            <p class="metric-value" style="color: {temp_color};">{temp_display}<span class="metric-unit">°C</span></p>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="{card_class}">'
+        f'<div class="metric-title">🌡️ Température Interne</div>'
+        f'<p class="metric-value">{temp_display}<span class="metric-unit"> °C</span></p>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 with col2:
-    st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">⚡ STABILITÉ (G-FORCE)</div>
-            <p class="metric-value" style="color: {gforce_color};">{gforce_display}<span class="metric-unit"> G</span></p>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="{card_class}">'
+        f'<div class="metric-title">⚡ Stabilité (G-Force)</div>'
+        f'<p class="metric-value">{gforce_display}<span class="metric-unit"> G</span></p>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
-# ── INSTRUCTIONS CHAUFFEUR (Seulement si Alerte) ─────────────────────────────
-if status == 1:
-    st.markdown("""
-        <div class="alert-instruction">
-            🛑 ACTIONS REQUISES IMMÉDIATEMENT :<br>
-            1. Garez-vous en sécurité dès que possible.<br>
-            2. Contrôlez l'intégrité de la palette et le groupe frigorifique.<br>
-            3. Contactez le superviseur logistique.
-        </div>
-    """, unsafe_allow_html=True)
+st.markdown("", unsafe_allow_html=True)  # Espacement
 
-st.markdown("<br>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# GRAPHIQUES D'HISTORIQUE TEMPS RÉEL
+# ══════════════════════════════════════════════════════════════════════════════
+col_chart1, col_chart2 = st.columns(2)
 
-# ── GRAPHIQUES HISTORIQUES (Secondaires pour le chauffeur) ───────────────────
-with st.expander("📊 Afficher l'historique détaillé (Supervision)", expanded=(status==1)):
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1:
-        if len(shared_state["temp_history"]) > 0:
-            st.line_chart(pd.DataFrame(list(shared_state["temp_history"]), columns=["Température (°C)"]), height=200)
-    with chart_col2:
-        if len(shared_state["gforce_history"]) > 0:
-            st.line_chart(pd.DataFrame(list(shared_state["gforce_history"]), columns=["G-Force"]), height=200)
+with col_chart1:
+    st.markdown(
+        "<h4 style='color:#8899AA; text-align:center;'>📈 Historique Température (°C)</h4>",
+        unsafe_allow_html=True,
+    )
+    temp_data = list(shared_state["temp_history"])
+    if len(temp_data) > 1:
+        st.line_chart(pd.DataFrame(temp_data, columns=["Température (°C)"]))
+    else:
+        st.info("⏳ En attente de données de température...")
 
-# ── Boucle de rafraîchissement automatique ───────────────────────────────────
+with col_chart2:
+    st.markdown(
+        "<h4 style='color:#8899AA; text-align:center;'>📈 Historique G-Force (G)</h4>",
+        unsafe_allow_html=True,
+    )
+    gforce_data = list(shared_state["gforce_history"])
+    if len(gforce_data) > 1:
+        st.line_chart(pd.DataFrame(gforce_data, columns=["G-Force (G)"]))
+    else:
+        st.info("⏳ En attente de données de G-Force...")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BARRE DE STATISTIQUES
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown('<div class="custom-hr"></div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="stats-bar">'
+    f"<span>📩 Messages reçus : <b>{msg_count}</b></span>"
+    f"<span>🕐 Dernière MAJ : <b>{last_update}</b></span>"
+    f"<span>📡 Broker : <b>{BROKER_HOST}:{BROKER_PORT}</b></span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RAFRAÎCHISSEMENT AUTOMATIQUE (Boucle de polling Streamlit)
+# ══════════════════════════════════════════════════════════════════════════════
 time.sleep(1)
 st.rerun()

@@ -18,3 +18,7 @@ models/*.pkl
 # Configuration Streamlit et Jupyter
 .streamlit/
 .ipynb_checkpoints/
+
+# Simulink cache
+app/slprj/
+app/*.slxc
