@@ -1,24 +1,150 @@
-# Environnements virtuels
-venv/
-env/
+# ══════════════════════════════════════════════════════════════════════════════
+# ThermoPath — .gitignore (Zero Leak Policy)
+# IoT / IA / MQTT / Simulink / Docker
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── SECRETS & ENVIRONNEMENT (CRITIQUE) ───────────────────────────────────────
+# Fichiers d'environnement contenant mots de passe broker MQTT, clés API, tokens
 .env
+.env.*
+*.env.local
+*.env.production
+*.env.staging
+*.secret
+*.secrets
+*.key
+*.pem
+*.crt
+*.p12
 
-# Fichiers de cache Python
-__pycache__/
-*.py[cod]
-*$py.class
+# Docker Compose override local (peut contenir des credentials/volumes sensibles)
+docker-compose.override.yml
+docker-compose.local.yml
 
-# Données (On ignore tout le contenu sauf les .gitkeep éventuels)
+
+# ── DONNÉES & MODÈLES (Privacy & Anti-Bloat) ────────────────────────────────
+# Jeux de données d'entraînement, de test, payloads MQTT capturés
+# On conserve la structure du dossier via .gitkeep
 data/*
 !data/.gitkeep
 
-# Modèles sauvegardés
+# Modèles ML sérialisés (volumineux, reproductibles via le pipeline)
 models/*.pkl
+models/*.joblib
+models/*.h5
+models/*.onnx
 
-# Configuration Streamlit et Jupyter
-.streamlit/
+
+# ── LOGS & TRACES D'EXÉCUTION (Privacy) ─────────────────────────────────────
+# Journaux Python, Streamlit, broker Mosquitto (peuvent contenir des payloads bruts)
+*.log
+logs/
+mosquitto.log
+mosquitto.db
+nohup.out
+
+
+# ── PYTHON — Cache & Build ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Environnements virtuels
+venv/
+.venv/
+env/
+ENV/
+
+# Tests & Couverture
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checkers
+.mypy_cache/
+.pytype/
+.pyre/
+
+
+# ── MATLAB / SIMULINK (Anti-Bloatware & Dumps) ──────────────────────────────
+# Cache de simulation et build Simulink (contient chemins absolus locaux)
+slprj/
+*.slxc
+
+# Sauvegardes automatiques MATLAB
+*.asv
+*.slx.autosave
+*.mdl.autosave
+
+# Fichiers MEX compilés (spécifiques à l'architecture locale)
+*.mex*
+
+# Rapports de génération de code Simulink
+codegen/
+sccprj/
+
+# Fichiers temporaires MATLAB
+*.mat~
+octave-workspace
+
+
+# ── JUPYTER NOTEBOOK ─────────────────────────────────────────────────────────
 .ipynb_checkpoints/
+*.ipynb_checkpoints
 
-# Simulink cache
-app/slprj/
-app/*.slxc
+
+# ── STREAMLIT ────────────────────────────────────────────────────────────────
+# Le dossier .streamlit/ peut contenir des credentials (secrets.toml)
+.streamlit/
+
+
+# ── IDE & ÉDITEURS (Anti-Divulgation de Chemins Locaux) ─────────────────────
+# VS Code
+.vscode/
+
+# JetBrains (PyCharm, IntelliJ)
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+
+
+# ── DOCKER (Artefacts Locaux) ────────────────────────────────────────────────
+# Volumes Docker persistés localement
+docker-data/
+mosquitto-data/
+mosquitto-config/
+
+
+# ── SYSTÈME D'EXPLOITATION ──────────────────────────────────────────────────
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
