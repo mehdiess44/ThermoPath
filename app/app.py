@@ -44,6 +44,25 @@ SCALER_PATH = "models/scaler.pkl"
 ALERT_SOUND_PATH = "assets/alert.mp3"
 
 
+# ── Fonction utilitaire : Explicabilité IA (XAI) ─────────────────────────────
+def generate_xai_explanation(current_temp: float, current_gforce: float, temp_velocity: float) -> str:
+    """
+    Génère une explication heuristique pour l'alerte d'anomalie.
+    Priorité 1: Choc pur (gforce > 3.0)
+    Priorité 2: Fuite/Panne thermique (vélocité > 2.0)
+    Priorité 3: Dérive lente (température > -65.0)
+    Défaut: Instabilité complexe
+    """
+    if current_gforce is not None and current_gforce > 3.0:
+        return "Impact mécanique détecté. Vérifiez l'intégrité de la palette."
+    elif temp_velocity is not None and temp_velocity > 2.0:
+        return "Hausse thermique anormale rapide. Vérifiez l'alimentation du groupe frigorifique."
+    elif current_temp is not None and current_temp > -65.0:
+        return "Température critique atteinte par dérive. Vérifiez l'étanchéité des portes."
+    else:
+        return "Instabilité thermodynamique complexe détectée par l'IA. Contrôle visuel recommandé."
+
+
 # ── Fonction utilitaire : Alerte sonore ──────────────────────────────────────
 def play_alert_sound(file_path: str):
     """
@@ -91,6 +110,9 @@ def get_shared_state() -> dict:
         "last_status": None,
         # Wildcard 2 : Indice de Risque Thermique (0 à 100)
         "risk_score": 0,
+        # Latch d'alerte XAI (10 secondes)
+        "alert_until": 0,
+        "latched_xai_message": "",
         # Compteur de messages reçus
         "message_count": 0,
         # Horodatage de la dernière mise à jour
@@ -202,8 +224,18 @@ def start_mqtt_listener():
             risk_index = 50 - (raw_score * 200)
             shared_state["risk_score"] = int(np.clip(risk_index, 0, 100))
 
-            # Statut binaire pour l'UI : 1 = anomalie, 0 = normal
-            shared_state["last_status"] = 1 if prediction == -1 else 0
+            # Statut binaire et gestion du verrouillage de l'alerte XAI (Latch de 10s)
+            if prediction == -1:
+                shared_state["last_status"] = 1
+                # Calcul immédiat de la vélocité thermique au moment du crash
+                temp_velocity = temp_array[-1] - temp_array[0]
+                # Génération du message explicatif
+                explanation = generate_xai_explanation(temp, g_force, temp_velocity)
+                # Stockage dans l'état partagé avec un délai de 10 secondes
+                shared_state["latched_xai_message"] = explanation
+                shared_state["alert_until"] = time.time() + 10
+            else:
+                shared_state["last_status"] = 0
 
         except json.JSONDecodeError as e:
             print(f"[ERREUR] Erreur de decodage JSON : {e}")
@@ -268,7 +300,14 @@ start_mqtt_listener()
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Lecture des valeurs actuelles depuis l'état partagé ───────────────────────
-status = shared_state["last_status"]
+# Gestion du verrouillage d'alerte (10 secondes)
+if time.time() < shared_state["alert_until"]:
+    status = 1
+    explanation = shared_state["latched_xai_message"]
+else:
+    status = 0
+    explanation = ""
+
 temp_val = shared_state["last_temp"]
 gforce_val = shared_state["last_gforce"]
 risk_val = shared_state["risk_score"]
@@ -487,38 +526,10 @@ with col_net:
 
 st.markdown('<div class="custom-hr"></div>', unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# JAUGE DE RISQUE PRÉDICTIF (WILDCARD 2 : Explicabilité IA)
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown(
-    "<h3 style='text-align:center; color:#8899AA; font-weight:700; "
-    "letter-spacing:2px; text-transform:uppercase; margin-bottom:5px;'>"
-    "🧠 Indice de Risque Prédictif (IA)</h3>",
-    unsafe_allow_html=True,
-)
-
-# Barre de progression avec couleur conditionnelle
-# Streamlit ne supporte pas les couleurs custom sur st.progress, mais on affiche
-# le label avec la bonne couleur en dessous.
-st.progress(risk_val / 100.0)
-
-# Label de risque coloré
-if risk_val < 50:
-    risk_class = "risk-low"
-    risk_text = f"✅ Risque à {risk_val}% — Chaîne du froid sécurisée"
-elif risk_val < 80:
-    risk_class = "risk-medium"
-    risk_text = f"⚠️ Risque à {risk_val}% — Surveillance renforcée"
-else:
-    risk_class = "risk-high"
-    risk_text = f"🚨 Risque à {risk_val}% — RUPTURE IMMINENTE !"
-
-st.markdown(
-    f'<p class="risk-label {risk_class}">{risk_text}</p>',
-    unsafe_allow_html=True,
-)
-
-st.markdown("", unsafe_allow_html=True)  # Espacement
+# ── LOGIQUE XAI (Explicabilité IA) ───────────────────────────────────────────
+if status == 1:
+    # Affichage bien visible de l'explication verrouillée (Composant Streamlit)
+    st.warning(f"**🔍 Analyse Heuristique (XAI) :** {explanation}", icon="⚠️")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CARTES DE MÉTRIQUES GÉANTES
