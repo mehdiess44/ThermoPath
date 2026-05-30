@@ -14,6 +14,7 @@ import json
 import base64
 from collections import deque
 from datetime import datetime
+from threading import Lock
 import pandas as pd
 import numpy as np
 import joblib
@@ -39,9 +40,11 @@ BROKER_PORT = int(os.getenv("BROKER_PORT", "1883"))
 TOPIC = "thermopath/sensor"
 BUFFER_SIZE = 5  # Taille du tampon glissant pour le calcul des features IA
 
-MODEL_PATH = "models/model.pkl"
-SCALER_PATH = "models/scaler.pkl"
-ALERT_SOUND_PATH = "assets/alert.mp3"
+# Utilisation de chemins absolus pour éviter les problèmes de répertoire de travail (CWD)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "model.pkl")
+SCALER_PATH = os.path.join(BASE_DIR, "models", "scaler.pkl")
+ALERT_SOUND_PATH = os.path.join(BASE_DIR, "assets", "alert.mp3")
 
 
 # ── Fonction utilitaire : Explicabilité IA (XAI) ─────────────────────────────
@@ -63,27 +66,44 @@ def generate_xai_explanation(current_temp: float, current_gforce: float, temp_ve
         return "Instabilité thermodynamique complexe détectée par l'IA. Contrôle visuel recommandé."
 
 
+import streamlit.components.v1 as components
+
 # ── Fonction utilitaire : Alerte sonore ──────────────────────────────────────
 def play_alert_sound(file_path: str):
     """
-    Joue un fichier audio via un composant HTML <audio autoplay> encodé en base64.
-    Si le fichier n'existe pas, la fonction ne fait rien (dégradation gracieuse).
+    Joue un fichier audio d'alerte en arrière-plan sans afficher de lecteur.
+    Utilise components.html pour injecter un iframe invisible qui gère l'autoplay.
     """
     if not os.path.isfile(file_path):
         return
+
+    # Identifiant unique de l'alerte pour s'assurer que l'iframe
+    # n'est rechargé qu'une seule fois par nouvelle alerte.
+    alert_id = shared_state.get("alert_until", 0)
+    
     try:
         with open(file_path, "rb") as f:
             audio_bytes = f.read()
             b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
-            audio_html = (
-                f'<audio autoplay="true" style="display:none;">'
-                f'<source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">'
-                f"</audio>"
-            )
-            st.markdown(audio_html, unsafe_allow_html=True)
-    except Exception:
-        # Dégradation gracieuse : si le son ne peut pas être joué, on continue
-        pass
+            
+            # Injection via components.html qui crée un iframe (invisible avec width/height 0)
+            # L'ID d'alerte dans le commentaire garantit que Streamlit recharge l'iframe
+            # si et seulement si c'est une nouvelle alerte.
+            html_string = f"""
+            <!-- Alert ID: {alert_id} -->
+            <audio id="audio" autoplay="autoplay">
+                <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
+            </audio>
+            <script>
+                var audio = document.getElementById("audio");
+                audio.play().catch(function(e) {{
+                    console.log('Autoplay blocked:', e);
+                }});
+            </script>
+            """
+            components.html(html_string, width=0, height=0)
+    except Exception as e:
+        print(f"[ERREUR] Impossible de jouer le son : {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -119,6 +139,8 @@ def get_shared_state() -> dict:
         "last_update": "En attente...",
         # Wildcard 1 : État de connexion MQTT
         "mqtt_connected": False,
+        # Wildcard 3 : Verrou de sécurité critique pour éviter les écritures concurrentes (Race Conditions)
+        "lock": Lock()
     }
 
 
@@ -163,8 +185,8 @@ def start_mqtt_listener():
         """
         Traite chaque message MQTT reçu :
         1. Décode le payload JSON (temp, g_force).
-        2. Alimente les tampons et historiques.
-        3. Calcule les 7 features de l'IA.
+        2. Alimente les tampons et historiques (sous Mutex).
+        3. Calcule les 7 features de l'IA (incluant la vélocité corrigée).
         4. Applique le scaler puis le modèle Isolation Forest.
         5. Utilise decision_function() pour obtenir le score brut.
         6. Transforme le score en Indice de Risque Thermique (0-100%).
@@ -174,68 +196,63 @@ def start_mqtt_listener():
             temp = float(payload["temp"])
             g_force = float(payload["g_force"])
 
-            # Mise à jour des tampons glissants et historiques
-            shared_state["temp_buffer"].append(temp)
-            shared_state["gforce_buffer"].append(g_force)
-            shared_state["temp_history"].append(temp)
-            shared_state["gforce_history"].append(g_force)
-            shared_state["last_temp"] = temp
-            shared_state["last_gforce"] = g_force
-            shared_state["message_count"] += 1
-            shared_state["last_update"] = datetime.now().strftime("%H:%M:%S")
+            # Verrouillage complet du bloc d'écriture et d'inférence pour la Thread-Safety
+            with shared_state["lock"]:
+                # Mise à jour des tampons glissants et historiques
+                shared_state["temp_buffer"].append(temp)
+                shared_state["gforce_buffer"].append(g_force)
+                shared_state["temp_history"].append(temp)
+                shared_state["gforce_history"].append(g_force)
+                shared_state["last_temp"] = temp
+                shared_state["last_gforce"] = g_force
+                shared_state["message_count"] += 1
+                shared_state["last_update"] = datetime.now().strftime("%H:%M:%S")
 
-            # On attend d'avoir assez de données pour le calcul IA
-            if len(shared_state["temp_buffer"]) < BUFFER_SIZE:
-                shared_state["last_status"] = None
-                return
+                # On attend d'avoir assez de données pour le calcul IA
+                if len(shared_state["temp_buffer"]) < BUFFER_SIZE:
+                    shared_state["last_status"] = None
+                    return
 
-            # Calcul des 7 features
-            temp_array = np.array(shared_state["temp_buffer"])
-            gforce_array = np.array(shared_state["gforce_buffer"])
+                # Calcul des arrays
+                temp_array = np.array(shared_state["temp_buffer"])
+                gforce_array = np.array(shared_state["gforce_buffer"])
+                
+                # ── Correction MLOps : Vélocité calculée strictement sur 1 période
+                current_velocity = temp_array[-1] - temp_array[-2]
 
-            features = pd.DataFrame(
-                [
-                    {
-                        "thermal_shipper_temp_reading": temp,
-                        "g_force": g_force,
-                        "temp_mean": np.mean(temp_array),
-                        "temp_std": np.std(temp_array),
-                        "g_force_mean": np.mean(gforce_array),
-                        "g_force_std": np.std(gforce_array),
-                        "temp_velocity": temp_array[-1] - temp_array[0],
-                    }
-                ]
-            )
+                features = pd.DataFrame(
+                    [
+                        {
+                            "thermal_shipper_temp_reading": temp,
+                            "g_force": g_force,
+                            "temp_mean": np.mean(temp_array),
+                            "temp_std": np.std(temp_array),
+                            "g_force_mean": np.mean(gforce_array),
+                            "g_force_std": np.std(gforce_array),
+                            "temp_velocity": current_velocity,
+                        }
+                    ]
+                )
 
-            # Normalisation avec le scaler entraîné
-            features_scaled = scaler.transform(features)
+                # Normalisation avec le scaler entraîné
+                features_scaled = scaler.transform(features)
 
-            # ── WILDCARD 2 : Explicabilité Mathématique ──────────────────
-            # predict() → -1 (anomalie) ou 1 (normal)
-            # decision_function() → score brut (distance à la frontière)
-            #   Plus le score est négatif, plus l'observation est anormale.
-            raw_score = model.decision_function(features_scaled)[0]
-            prediction = model.predict(features_scaled)[0]
+                # ── WILDCARD 2 : Explicabilité Mathématique ──────────────────
+                raw_score = model.decision_function(features_scaled)[0]
+                prediction = model.predict(features_scaled)[0]
 
-            # Transformation du score brut en Indice de Risque (0% à 100%)
-            # Formule : on centre la frontière (score=0) autour de 50%.
-            # Score très négatif → Risque élevé (vers 100%)
-            # Score très positif → Risque faible (vers 0%)
-            risk_index = 50 - (raw_score * 200)
-            shared_state["risk_score"] = int(np.clip(risk_index, 0, 100))
+                # Transformation du score brut en Indice de Risque (0% à 100%)
+                risk_index = 50 - (raw_score * 200)
+                shared_state["risk_score"] = int(np.clip(risk_index, 0, 100))
 
-            # Statut binaire et gestion du verrouillage de l'alerte XAI (Latch de 10s)
-            if prediction == -1:
-                shared_state["last_status"] = 1
-                # Calcul immédiat de la vélocité thermique au moment du crash
-                temp_velocity = temp_array[-1] - temp_array[0]
-                # Génération du message explicatif
-                explanation = generate_xai_explanation(temp, g_force, temp_velocity)
-                # Stockage dans l'état partagé avec un délai de 10 secondes
-                shared_state["latched_xai_message"] = explanation
-                shared_state["alert_until"] = time.time() + 10
-            else:
-                shared_state["last_status"] = 0
+                # Statut binaire et gestion du verrouillage de l'alerte XAI (Latch de 10s)
+                if prediction == -1:
+                    shared_state["last_status"] = 1
+                    explanation = generate_xai_explanation(temp, g_force, current_velocity)
+                    shared_state["latched_xai_message"] = explanation
+                    shared_state["alert_until"] = time.time() + 10
+                else:
+                    shared_state["last_status"] = 0
 
         except json.JSONDecodeError as e:
             print(f"[ERREUR] Erreur de decodage JSON : {e}")
@@ -254,24 +271,17 @@ def start_mqtt_listener():
     client.on_message = on_message
 
     # ── WILDCARD 1 : Résilience Réseau Absolue ───────────────────────────
-    # Paramétrage de la reconnexion automatique de Paho-MQTT
-    # En cas de perte de connexion, Paho retente de 1s à 120s (backoff exponentiel)
     client.reconnect_delay_set(min_delay=1, max_delay=120)
 
     # Tentative de connexion initiale dans un thread séparé.
-    # Si le broker n'est pas joignable au démarrage, on retente indéfiniment
-    # au lieu de crasher l'application.
     def connect_with_retry():
-        """Boucle de connexion initiale avec backoff exponentiel."""
         retry_delay = 1  # Délai initial en secondes
         max_delay = 30  # Délai maximum entre les tentatives
         while True:
             try:
                 client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
-                # loop_forever gere automatiquement la reconnexion apres
-                # une connexion initiale reussie.
                 client.loop_forever()
-                break  # Si loop_forever retourne proprement
+                break
             except OSError as e:
                 shared_state["mqtt_connected"] = False
                 print(
@@ -308,18 +318,17 @@ else:
     status = 0
     explanation = ""
 
-temp_val = shared_state["last_temp"]
-gforce_val = shared_state["last_gforce"]
-risk_val = shared_state["risk_score"]
-is_connected = shared_state["mqtt_connected"]
-msg_count = shared_state["message_count"]
-last_update = shared_state["last_update"]
+with shared_state["lock"]:
+    temp_val = shared_state["last_temp"]
+    gforce_val = shared_state["last_gforce"]
+    risk_val = shared_state["risk_score"]
+    is_connected = shared_state["mqtt_connected"]
+    msg_count = shared_state["message_count"]
+    last_update = shared_state["last_update"]
 
 # ── CSS Personnalisé : Design "Terminal Cabine" ──────────────────────────────
-# CSS de base pour les cartes de métriques, la jauge de risque, et le flash d'alerte
 alert_css = ""
 if status == 1:
-    # FLASH D'ALERTE : fond de l'application clignote en rouge
     alert_css = """
     .stApp {
         background-color: #3b0000 !important;
@@ -539,7 +548,6 @@ col1, col2 = st.columns(2)
 temp_display = f"{temp_val:.1f}" if temp_val is not None else "—"
 gforce_display = f"{gforce_val:.2f}" if gforce_val is not None else "—"
 
-# Choix de la classe CSS selon le statut d'alerte
 card_class = "metric-card-alert" if status == 1 else "metric-card"
 
 with col1:
@@ -572,22 +580,24 @@ with col_chart1:
         "<h4 style='color:#8899AA; text-align:center;'>📈 Historique Température (°C)</h4>",
         unsafe_allow_html=True,
     )
-    temp_data = list(shared_state["temp_history"])
-    if len(temp_data) > 1:
-        st.line_chart(pd.DataFrame(temp_data, columns=["Température (°C)"]))
-    else:
-        st.info("⏳ En attente de données de température...")
+    with shared_state["lock"]:
+        temp_data = list(shared_state["temp_history"])
+        if len(temp_data) > 1:
+            st.line_chart(pd.DataFrame(temp_data, columns=["Température (°C)"]))
+        else:
+            st.info("⏳ En attente de données de température...")
 
 with col_chart2:
     st.markdown(
         "<h4 style='color:#8899AA; text-align:center;'>📈 Historique G-Force (G)</h4>",
         unsafe_allow_html=True,
     )
-    gforce_data = list(shared_state["gforce_history"])
-    if len(gforce_data) > 1:
-        st.line_chart(pd.DataFrame(gforce_data, columns=["G-Force (G)"]))
-    else:
-        st.info("⏳ En attente de données de G-Force...")
+    with shared_state["lock"]:
+        gforce_data = list(shared_state["gforce_history"])
+        if len(gforce_data) > 1:
+            st.line_chart(pd.DataFrame(gforce_data, columns=["G-Force (G)"]))
+        else:
+            st.info("⏳ En attente de données de G-Force...")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BARRE DE STATISTIQUES
