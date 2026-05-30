@@ -1,0 +1,27 @@
+services:
+  mqtt_broker:
+    image: eclipse-mosquitto:latest
+    container_name: mqtt_broker
+    ports:
+      - "1884:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    networks:
+      - thermopath_net
+
+  dashboard:
+    build: .
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - BROKER_HOST=mqtt_broker
+      - BROKER_PORT=1883
+    depends_on:
+      - mqtt_broker
+    networks:
+      - thermopath_net
+
+networks:
+  thermopath_net:
+    driver: bridge

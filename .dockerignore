@@ -1,0 +1,11 @@
+# Environnements virtuels
+venv/
+env/
+.env
+.venv/
+
+# Caches et Git
+__pycache__/
+*.pyc
+.git/
+.ipynb_checkpoints/

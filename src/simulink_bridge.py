@@ -7,7 +7,6 @@ import sys
 import json
 import paho.mqtt.publish as publish
 
-# Vérifie que MATLAB a bien envoyé les 2 arguments
 if len(sys.argv) == 3:
     try:
         temp = float(sys.argv[1])
@@ -16,8 +15,11 @@ if len(sys.argv) == 3:
         # Formatage JSON
         payload = json.dumps({"temp": temp, "g_force": g_force})
         
-        # Envoi "One-Shot" ultra-rapide (pas besoin de maintenir une connexion)
-        publish.single("thermopath/sensor", payload, hostname="localhost", port=1883)
+        # Envoi "One-Shot" vers l'IP locale (Force l'IPv4 pour contourner le blocage WSL)
+        publish.single("thermopath/sensor", payload, hostname="127.0.0.1", port=1884)
+        
+        # Message de confirmation visuelle
+        print(f"✅ SUCCÈS : {payload} envoyé sur 127.0.0.1:1884")
         
     except Exception as e:
-        print(f"Erreur d'envoi : {e}")
+        print(f"❌ Erreur d'envoi : {e}")
