@@ -23,6 +23,29 @@ lance Streamlit sur le port ``8501`` et reçoit les variables d'environnement :
 Ces valeurs indiquent au dashboard de joindre le broker par son nom de service
 Docker, et non par ``localhost``.
 
+Commandes d'exploitation
+------------------------
+
+Depuis la racine du depot, reconstruisez et lancez l'ensemble en arriere-plan :
+
+.. code-block:: powershell
+
+   docker compose up --build -d
+
+Verifiez ensuite l'etat des services :
+
+.. code-block:: powershell
+
+   docker compose ps
+   docker compose logs -f mqtt_broker
+   docker compose logs -f dashboard
+
+Pour arreter proprement l'infrastructure :
+
+.. code-block:: powershell
+
+   docker compose down
+
 Réseau thermopath_net
 ---------------------
 
@@ -42,3 +65,17 @@ atteindre le service Mosquitto.
 
    Le port ``1884`` est utile depuis la machine hôte, notamment pour le bridge
    Simulink. Entre conteneurs, le port interne ``1883`` est utilisé directement.
+
+Role du port proxy 1884
+-----------------------
+
+Le port hote ``1884`` redirige vers ``1883`` dans le conteneur Mosquitto. Ce
+choix evite les collisions avec un broker MQTT local souvent installe sur
+``1883`` sous Windows, et rend le chemin Simulink plus explicite :
+
+.. code-block:: text
+
+   Simulink / Python hote -> 127.0.0.1:1884 -> mqtt_broker:1883
+
+Le dashboard conteneurise ne doit pas utiliser ``1884`` : il reste sur le reseau
+Docker ``thermopath_net`` et joint directement ``mqtt_broker:1883``.

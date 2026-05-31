@@ -18,6 +18,21 @@ Ces valeurs sont converties en ``float`` avant publication. Cette interface est
 simple à piloter depuis un bloc MATLAB/Simulink capable d'appeler un processus
 externe.
 
+Commande Simulink
+-----------------
+
+Dans le bloc d'appel systeme du modele ``app/publish_mqtt.slx``, utilisez la
+commande suivante si le repertoire courant de simulation est ``app`` :
+
+.. code-block:: text
+
+   python ../src/simulink_bridge.py <temp> <g_force>
+
+``<temp>`` et ``<g_force>`` representent les valeurs injectees par Simulink. Si
+MATLAB n'utilise pas le meme interpreteur Python que votre environnement
+virtuel, remplacez ``python`` par le chemin explicite vers
+``.venv\\Scripts\\python.exe``.
+
 Sérialisation JSON
 ------------------
 
@@ -43,6 +58,10 @@ le topic ``thermopath/sensor``. Dans le dépôt actuel, la publication cible
 .. code-block:: python
 
    publish.single("thermopath/sensor", payload, hostname="127.0.0.1", port=1884)
+
+Le choix de ``127.0.0.1`` force IPv4 et evite les pertes silencieuses observees
+sur certaines configurations Windows/WSL2 lorsque ``localhost`` resout vers
+``::1``.
 
 Processus léger et éphémère
 ---------------------------

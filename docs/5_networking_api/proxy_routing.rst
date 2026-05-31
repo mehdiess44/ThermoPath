@@ -45,6 +45,20 @@ prévu sur IPv6, la connexion échoue malgré un service actif côté IPv4.
 Forcer ``127.0.0.1`` rend le chemin réseau plus déterministe pour la
 démonstration.
 
+Diagnostic rapide
+-----------------
+
+Sous Windows, verifiez les ports MQTT exposes avec :
+
+.. code-block:: powershell
+
+   netstat -ano | findstr :1884
+   netstat -ano | findstr :1883
+
+``1884`` doit correspondre au port hote Docker de ThermoPath. ``1883`` peut etre
+occupe par un Mosquitto local sans bloquer la demonstration, car le projet
+utilise justement ``1884`` cote hote.
+
 .. warning::
 
    En production, le routage devrait être explicite via un nom DNS, une adresse

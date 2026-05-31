@@ -41,6 +41,12 @@ Table des matières
 
 .. toctree::
    :maxdepth: 2
+   :caption: Démarrage
+
+   0_getting_started/installation
+
+.. toctree::
+   :maxdepth: 2
    :caption: Boucle cyber-physique
 
    1_cyber_physical_loop/overview
@@ -77,4 +83,5 @@ Table des matières
    :caption: Réseau et API
 
    5_networking_api/proxy_routing
+   5_networking_api/troubleshooting_windows_wsl
    5_networking_api/api_reference

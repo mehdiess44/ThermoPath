@@ -54,3 +54,25 @@ Calcul temps réel
    Le dashboard concentre plusieurs responsabilités pour rester simple dans un
    MVP. Dans une version industrielle, le calcul ML pourrait être séparé dans un
    service backend dédié.
+
+Lancement
+---------
+
+En mode conteneurise, le service ``dashboard`` est lance par Docker Compose et
+expose Streamlit sur :
+
+.. code-block:: text
+
+   http://localhost:8501
+
+En mode bare metal, lancez l'application depuis la racine du depot :
+
+.. code-block:: powershell
+
+   $env:BROKER_HOST = "127.0.0.1"
+   $env:BROKER_PORT = "1884"
+   streamlit run app/app.py
+
+Le port ``1884`` cible le proxy hote expose par ``docker-compose.yml``. Dans
+Docker Compose, ces variables valent ``mqtt_broker`` et ``1883`` afin d'utiliser
+le reseau interne ``thermopath_net``.
