@@ -248,8 +248,19 @@ def start_mqtt_listener():
                 # Statut binaire et gestion du verrouillage de l'alerte XAI (Latch de 10s)
                 if prediction == -1:
                     shared_state["last_status"] = 1
-                    explanation = generate_xai_explanation(temp, g_force, current_velocity)
-                    shared_state["latched_xai_message"] = explanation
+                    # Calcul immédiat de la vélocité thermique
+                    current_velocity = temp_array[-1] - temp_array[-2]
+                    new_explanation = generate_xai_explanation(temp, g_force, current_velocity)
+                    
+                    # CORRECTION DU "GHOST EFFECT"
+                    default_msg = "Instabilité thermodynamique complexe détectée par l'IA. Contrôle visuel recommandé."
+                    
+                    # Mise à jour du message SEULEMENT si c'est le début d'une nouvelle alerte 
+                    # OU si l'explication est spécifique (et non le message par défaut).
+                    if time.time() >= shared_state["alert_until"] or new_explanation != default_msg:
+                        shared_state["latched_xai_message"] = new_explanation
+                    
+                    # Prolongation du timer de 10 secondes
                     shared_state["alert_until"] = time.time() + 10
                 else:
                     shared_state["last_status"] = 0
