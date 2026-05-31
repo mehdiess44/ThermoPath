@@ -4,7 +4,6 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-enabled-blue.svg)
 ![Streamlit](https://img.shields.io/badge/streamlit-app-red.svg)
-![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
 
 ## À Propos du Projet
 Les ruptures thermiques liées aux chocs physiques lors du transport sur le dernier kilomètre constituent un enjeu majeur pour l'intégrité de la chaîne du froid. **ThermoPath** apporte une solution performante grâce à la détection prédictive par IA et la corrélation thermodynamique, permettant d'identifier et de diagnostiquer la cause des pannes en temps réel.
