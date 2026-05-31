@@ -12,8 +12,8 @@ sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
 project = "ThermoPath"
-author = "Alaae Najib"
-copyright = "2026, Alaae Najib"
+author = "Youssef Laaroussi & ElMehdi Es Sadiki"
+copyright = "2026, ThermoPath"
 
 extensions = [
     "sphinx.ext.autodoc",
