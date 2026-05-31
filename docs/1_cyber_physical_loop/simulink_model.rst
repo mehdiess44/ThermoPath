@@ -16,6 +16,23 @@ fournit deux grandeurs principales :
 
 Ces valeurs sont transmises au bridge Python afin d'être publiées sur MQTT.
 
+Ouverture du modele
+-------------------
+
+Le modele se trouve dans ``app/publish_mqtt.slx``. Ouvrez-le depuis MATLAB
+Simulink, puis verifiez que le bloc charge d'appeler le systeme externe pointe
+vers le bridge Python du depot.
+
+Si le modele est lance depuis le dossier ``app``, la commande de reference est :
+
+.. code-block:: text
+
+   python ../src/simulink_bridge.py <temp> <g_force>
+
+Les deux arguments doivent correspondre aux signaux Simulink representant la
+temperature et la force mecanique instantanee. Le bridge convertit ces valeurs
+en ``float`` avant publication MQTT.
+
 Modèle thermodynamique à haut niveau
 ------------------------------------
 
@@ -39,6 +56,11 @@ ThermoPath utilise une accélération temporelle :
 Ce choix permet de rejouer rapidement des phénomènes qui seraient trop lents à
 observer en temps réel strict. Une dérive de 30 minutes simulées peut ainsi être
 observée en 30 secondes de démonstration.
+
+Cette dilatation temporelle est aussi une contrainte ML : le dashboard conserve
+une fenetre glissante de ``5`` messages, donc ``5`` secondes reelles. Avec le
+facteur ``60x``, cette fenetre represente ``5`` minutes simulees, soit la meme
+granularite que les donnees d'entrainement.
 
 Alignement avec l'entraînement
 ------------------------------
