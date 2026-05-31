@@ -69,6 +69,9 @@ htmlcov/
 .tox/
 .nox/
 
+# Documentation Sphinx / ReadTheDocs
+docs/_build/
+
 # Type checkers
 .mypy_cache/
 .pytype/
